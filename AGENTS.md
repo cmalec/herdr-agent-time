@@ -69,30 +69,30 @@ SHA-256 of `HERDR_SOCKET_PATH`, so separate Herdr sessions do not share state.
 
 The repository has no subpackages; all Go files are `package main` at the root.
 
-| Path | Purpose |
-|---|---|
-| `/` | CLI, daemon loop, tracker, client, and their tests |
-| `bin/` | Build output; only `.gitkeep` is committed |
-| `docs/assets/` | README images |
-| `.agents/rules/` | Vendored Go documentation rule |
-| `.agents/skills/` | Scoped-commit and `herdr-plugin-reference` skills |
-| `.github/workflows/` | CI workflow |
-| Herdr state dir | Runtime JSON state and logs; never committed |
+| Path                 | Purpose                                            |
+| -------------------- | -------------------------------------------------- |
+| `/`                  | CLI, daemon loop, tracker, client, and their tests |
+| `bin/`               | Build output; only `.gitkeep` is committed         |
+| `docs/assets/`       | README images                                      |
+| `.agents/rules/`     | Vendored Go documentation rule                     |
+| `.agents/skills/`    | Scoped-commit and `herdr-plugin-reference` skills  |
+| `.github/workflows/` | CI workflow                                        |
+| Herdr state dir      | Runtime JSON state and logs; never committed       |
 
 ## Development Commands
 
 Use the Makefile targets; CI invokes the same commands.
 
-| Target | Purpose |
-|---|---|
-| `make build` | Build `bin/herdr-agent-time` |
-| `make test` | Run unit tests |
-| `make test-race` | Run tests with the race detector |
-| `make check` | Check formatting, run vet, and run tests |
-| `make lint` | Run golangci-lint |
-| `make cover` | Write and print coverage |
-| `make fmt` | Format all Go files |
-| `make clean` | Remove build and coverage output |
+| Target           | Purpose                                  |
+| ---------------- | ---------------------------------------- |
+| `make build`     | Build `bin/herdr-agent-time`             |
+| `make test`      | Run unit tests                           |
+| `make test-race` | Run tests with the race detector         |
+| `make check`     | Check formatting, run vet, and run tests |
+| `make lint`      | Run golangci-lint                        |
+| `make cover`     | Write and print coverage                 |
+| `make fmt`       | Format all Go files                      |
+| `make clean`     | Remove build and coverage output         |
 
 Build the binary where the manifest expects it:
 
@@ -174,24 +174,24 @@ Linking does not run the manifest's `[[build]]` command; build first.
 
 ## Important Files
 
-| File | Role |
-|---|---|
-| `main.go` | CLI dispatch, path resolution, identity, locking, ensure/stop/status, daemon wiring |
-| `daemon.go` | Polling loop, plugin watchdog, state-save cadence, shutdown |
-| `tracker.go` | `AgentInfo`, `PaneState`, `Tracker`, decisions, persistence |
-| `client.go` | Herdr Unix-socket JSON-lines client |
-| `herdr-plugin.toml` | Build, startup, and three global actions; keep commands in sync with `main.go` |
-| `doc.go` | Package-level architecture and command documentation |
-| `example_test.go` | Compiler-checked duration formatting example |
-| `tracker_test.go` | State-machine, restart, formatting, and persistence tests |
-| `daemon_test.go` | Tick, watchdog, save backoff, inode, and shutdown tests |
-| `client_test.go` | Fake Unix-socket RPC tests, retries, errors, and cancellation |
-| `main_test.go` | Path, identity, status duration, locking, PID, and socket inode tests |
-| `.agents/skills/herdr-plugin-reference/SKILL.md` | Herdr manifest, lifecycle, metadata, and socket contract |
-| `Makefile` | Build, test, coverage, formatting, and CI targets |
-| `.github/workflows/ci.yml` | Ubuntu/macOS CI using `make check`, race tests, golangci-lint, and build |
-| `README.md` | User-facing install, sidebar, lifecycle, development, and limits |
-| `go.mod` | Module path, Go version, and test dependency |
+| File                                             | Role                                                                                |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `main.go`                                        | CLI dispatch, path resolution, identity, locking, ensure/stop/status, daemon wiring |
+| `daemon.go`                                      | Polling loop, plugin watchdog, state-save cadence, shutdown                         |
+| `tracker.go`                                     | `AgentInfo`, `PaneState`, `Tracker`, decisions, persistence                         |
+| `client.go`                                      | Herdr Unix-socket JSON-lines client                                                 |
+| `herdr-plugin.toml`                              | Build, startup, and three global actions; keep commands in sync with `main.go`      |
+| `doc.go`                                         | Package-level architecture and command documentation                                |
+| `example_test.go`                                | Compiler-checked duration formatting example                                        |
+| `tracker_test.go`                                | State-machine, restart, formatting, and persistence tests                           |
+| `daemon_test.go`                                 | Tick, watchdog, save backoff, inode, and shutdown tests                             |
+| `client_test.go`                                 | Fake Unix-socket RPC tests, retries, errors, and cancellation                       |
+| `main_test.go`                                   | Path, identity, status duration, locking, PID, and socket inode tests               |
+| `.agents/skills/herdr-plugin-reference/SKILL.md` | Herdr manifest, lifecycle, metadata, and socket contract                            |
+| `Makefile`                                       | Build, test, coverage, formatting, and CI targets                                   |
+| `.github/workflows/ci.yml`                       | Ubuntu/macOS CI using `make check`, race tests, golangci-lint, and build            |
+| `README.md`                                      | User-facing install, sidebar, lifecycle, development, and limits                    |
+| `go.mod`                                         | Module path, Go version, and test dependency                                        |
 
 ## Runtime/Tooling Preferences
 
@@ -203,12 +203,12 @@ Linking does not run the manifest's `[[build]]` command; build first.
 - Use `bin/` for all compiled output. Do not commit the binary.
 - CI runs on Ubuntu and macOS from `.github/workflows/ci.yml`.
 
-| Variable | Use |
-|---|---|
-| `HERDR_SOCKET_PATH` | Required; selects the Herdr socket and keys state files |
+| Variable                 | Use                                                                                  |
+| ------------------------ | ------------------------------------------------------------------------------------ |
+| `HERDR_SOCKET_PATH`      | Required; selects the Herdr socket and keys state files                              |
 | `HERDR_PLUGIN_STATE_DIR` | State directory; falls back to `XDG_STATE_HOME` or `~/.local/state/herdr-agent-time` |
-| `HERDR_PLUGIN_ROOT` | Plugin installation root; recorded in the identity and checked by the watchdog |
-| `HERDR_PLUGIN_ID` | Enables the daemon's plugin-registry watchdog when it equals `cmalec.agent-time` |
+| `HERDR_PLUGIN_ROOT`      | Plugin installation root; recorded in the identity and checked by the watchdog       |
+| `HERDR_PLUGIN_ID`        | Enables the daemon's plugin-registry watchdog when it equals `cmalec.agent-time`     |
 
 ## Testing & QA
 

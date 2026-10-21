@@ -68,20 +68,20 @@ replace a daemon after an update or relink.
 
 Herdr injects:
 
-| Variable | Meaning |
-|---|---|
-| `HERDR_SOCKET_PATH` | Running server socket. Required by this plugin. |
-| `HERDR_BIN_PATH` | Running Herdr executable; preferred for portable CLI calls. |
-| `HERDR_ENV=1` | Set when running under Herdr. |
-| `HERDR_PLUGIN_ID` | Current plugin id. |
-| `HERDR_PLUGIN_ROOT` | Installed or linked plugin directory. |
-| `HERDR_PLUGIN_CONFIG_DIR` | User-editable plugin config directory. |
-| `HERDR_PLUGIN_STATE_DIR` | Durable runtime state directory. |
-| `HERDR_PLUGIN_CONTEXT_JSON` | Invocation context JSON. |
-| `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, `HERDR_PANE_ID` | Focused context when available. |
-| `HERDR_PLUGIN_ACTION_ID` | Action invocation. |
-| `HERDR_PLUGIN_EVENT`, `HERDR_PLUGIN_EVENT_JSON` | Event hook invocation. |
-| `HERDR_PLUGIN_ENTRYPOINT_ID` | Pane invocation. |
+| Variable                                              | Meaning                                                     |
+| ----------------------------------------------------- | ----------------------------------------------------------- |
+| `HERDR_SOCKET_PATH`                                   | Running server socket. Required by this plugin.             |
+| `HERDR_BIN_PATH`                                      | Running Herdr executable; preferred for portable CLI calls. |
+| `HERDR_ENV=1`                                         | Set when running under Herdr.                               |
+| `HERDR_PLUGIN_ID`                                     | Current plugin id.                                          |
+| `HERDR_PLUGIN_ROOT`                                   | Installed or linked plugin directory.                       |
+| `HERDR_PLUGIN_CONFIG_DIR`                             | User-editable plugin config directory.                      |
+| `HERDR_PLUGIN_STATE_DIR`                              | Durable runtime state directory.                            |
+| `HERDR_PLUGIN_CONTEXT_JSON`                           | Invocation context JSON.                                    |
+| `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, `HERDR_PANE_ID` | Focused context when available.                             |
+| `HERDR_PLUGIN_ACTION_ID`                              | Action invocation.                                          |
+| `HERDR_PLUGIN_EVENT`, `HERDR_PLUGIN_EVENT_JSON`       | Event hook invocation.                                      |
+| `HERDR_PLUGIN_ENTRYPOINT_ID`                          | Pane invocation.                                            |
 
 Do not store durable user data in `HERDR_PLUGIN_ROOT`. GitHub installs replace
 that directory. Use the state and config directories.
@@ -91,7 +91,7 @@ that directory. Use the state and config directories.
 The socket is newline-delimited JSON. One request per line:
 
 ```json
-{"id":"req_1","method":"agent.list","params":{}}
+{ "id": "req_1", "method": "agent.list", "params": {} }
 ```
 
 One response per line:
@@ -126,7 +126,7 @@ Params this plugin uses:
 {
   "pane_id": "w1:p1",
   "source": "herdr-agent-time",
-  "tokens": {"turn_time": "1:42"},
+  "tokens": { "turn_time": "1:42" },
   "ttl_ms": 3000
 }
 ```

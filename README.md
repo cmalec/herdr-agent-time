@@ -5,11 +5,6 @@ runtime in the sidebar. While the agent works, the value ticks every second.
 When the turn ends, the final duration stays visible until the next turn starts
 (or until the agent exits).
 
-| State | Sidebar |
-|---|---|
-| Working | `omp · 0:07` |
-| Done | `omp · 1:42` |
-
 ![Herdr sidebar showing an omp agent with a completed 6:07 turn time](docs/assets/agent-time-sidebar.png)
 
 Published as a community plugin. Herdr discovers community plugins on GitHub
@@ -125,10 +120,10 @@ Show the config diff before writing. Do not replace unrelated settings.
 The plugin manifest starts a detached timer daemon from Herdr's startup hook.
 Actions are available under the `cmalec.agent-time` plugin id:
 
-| Action | Command |
-|---|---|
-| Start timer | `herdr plugin action invoke cmalec.agent-time.start` |
-| Stop timer | `herdr plugin action invoke cmalec.agent-time.stop` |
+| Action      | Command                                               |
+| ----------- | ----------------------------------------------------- |
+| Start timer | `herdr plugin action invoke cmalec.agent-time.start`  |
+| Stop timer  | `herdr plugin action invoke cmalec.agent-time.stop`   |
 | Show status | `herdr plugin action invoke cmalec.agent-time.status` |
 
 The daemon talks to Herdr over its Unix socket. It reads `agent.list` once per
@@ -162,17 +157,17 @@ Package documentation lives in `doc.go`, and compiler-checked examples live in
 `example_test.go`. The Herdr plugin and socket contract is summarized in
 `.agents/skills/herdr-plugin-reference/SKILL.md`.
 
-| Target | Purpose |
-|---|---|
-| `make build` | Build `bin/herdr-agent-time` |
-| `make test` | Run unit tests |
-| `make test-race` | Run unit tests with the race detector |
-| `make check` | Check formatting, run vet, and run tests |
-| `make lint` | Run golangci-lint |
-| `make ci` | Run check, race tests, lint, and build |
-| `make cover` | Write and print statement coverage |
-| `make fmt` | Format all Go files |
-| `make clean` | Remove the binary and coverage file |
+| Target           | Purpose                                  |
+| ---------------- | ---------------------------------------- |
+| `make build`     | Build `bin/herdr-agent-time`             |
+| `make test`      | Run unit tests                           |
+| `make test-race` | Run unit tests with the race detector    |
+| `make check`     | Check formatting, run vet, and run tests |
+| `make lint`      | Run golangci-lint                        |
+| `make ci`        | Run check, race tests, lint, and build   |
+| `make cover`     | Write and print statement coverage       |
+| `make fmt`       | Format all Go files                      |
+| `make clean`     | Remove the binary and coverage file      |
 
 Build the plugin binary:
 

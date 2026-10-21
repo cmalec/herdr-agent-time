@@ -35,7 +35,7 @@ scope: description
 - **Description** is imperative, starts lowercase, no trailing period. It says
   what the change does, not what kind of change it is.
 - **Subject line ≤ 72 characters.** Move detail to the body.
-- **Body** (optional) explains *why*, links context, notes trade-offs. Wrap at 80.
+- **Body** (optional) explains _why_, links context, notes trade-offs. Wrap at 80.
 - **PR number** is appended by squash-merge (`... (#123)`). Do not type it by hand.
 - **No ticket IDs in the scope.** If a ticket reference is mandatory, put it in
   the body or a footer (`Refs: PROJ-1234`), never where the scope belongs.
@@ -48,7 +48,7 @@ subject line** on the default branch (GitHub appends the PR number). Therefore:
 - PR titles follow the same `scope: description` format as commit messages.
 - Write the PR title as the commit you want to land, not as a branch summary.
   `api: add request timeout middleware`, not `Timeout feature branch`.
-- The PR body maps to the commit body: put the *why* there. Trim GitHub
+- The PR body maps to the commit body: put the _why_ there. Trim GitHub
   template boilerplate before merging so it does not land in the commit log.
 - In-branch commits can be looser (`wip`, `bump`) since squash-merge erases
   them — but keeping them scoped makes review easier and protects you if the
@@ -69,16 +69,16 @@ catalog (for example a `COMMITS.md`) before inventing new scopes.
 
 ### Example catalog (generic service repository)
 
-| Scope | Covers |
-|---|---|
-| `api` | HTTP API, request handlers, validation, and public contracts |
-| `worker` | Background jobs, queues, retries, and scheduling |
-| `web` | Browser UI, routes, components, and client state |
-| `db` | Schema, migrations, queries, and storage adapters |
-| `auth` | Identity, sessions, permissions, and access control |
-| `deploy` | Charts, deployment config, and environment wiring |
-| `docs` | Documentation-only changes |
-| `deps` | Dependency updates with no product behavior change |
+| Scope    | Covers                                                       |
+| -------- | ------------------------------------------------------------ |
+| `api`    | HTTP API, request handlers, validation, and public contracts |
+| `worker` | Background jobs, queues, retries, and scheduling             |
+| `web`    | Browser UI, routes, components, and client state             |
+| `db`     | Schema, migrations, queries, and storage adapters            |
+| `auth`   | Identity, sessions, permissions, and access control          |
+| `deploy` | Charts, deployment config, and environment wiring            |
+| `docs`   | Documentation-only changes                                   |
+| `deps`   | Dependency updates with no product behavior change           |
 
 ### Cross-cutting changes
 
@@ -90,10 +90,10 @@ catalog (for example a `COMMITS.md`) before inventing new scopes.
 
 ## What not to do
 
-- `bump`, `bump chart`, `dummy change` — say *what* bumped and *why*.
+- `bump`, `bump chart`, `dummy change` — say _what_ bumped and _why_.
 - `fixing merge conflicts` — do not commit conflict-resolution noise; rebase
   instead, or if the resolution was substantive, describe the actual change.
-- `cleanup` — cleanup of *what*? `api: drop unused request fixtures` tells a
+- `cleanup` — cleanup of _what_? `api: drop unused request fixtures` tells a
   story; `cleanup` does not.
 - `addressing comment` — the comment is not visible in the log; the change is.
 - Type-prefixed multi-change subjects like `feat: add search + switch storage`
@@ -101,13 +101,13 @@ catalog (for example a `COMMITS.md`) before inventing new scopes.
 
 ## Rewrites from typical history
 
-| Before | After |
-|---|---|
-| `feat(api): add request timeouts (#90)` | `api: add request timeouts (#90)` |
-| `fix(worker): retry failed jobs (#72)` | `worker: retry failed jobs (#72)` |
-| `perf(db): reduce query count (#60)` | `db: reduce query count (#60)` |
-| `bumping up secrets (#80)` | `deploy: bump secrets to v5 (#80)` |
-| `Mitigate fire-and-forget risks (#87)` | `worker: make callbacks at-least-once instead of fire-and-forget (#87)` |
-| `UI improvements (#76)` | `web: fix empty state on the search page (#76)` |
-| `feat: add CSV export (#92)` | `api: add CSV export for reports (#92)` |
-| `scheduling fix for worker api (#84)` | `worker: fix scheduled retry ordering (#84)` |
+| Before                                  | After                                                                   |
+| --------------------------------------- | ----------------------------------------------------------------------- |
+| `feat(api): add request timeouts (#90)` | `api: add request timeouts (#90)`                                       |
+| `fix(worker): retry failed jobs (#72)`  | `worker: retry failed jobs (#72)`                                       |
+| `perf(db): reduce query count (#60)`    | `db: reduce query count (#60)`                                          |
+| `bumping up secrets (#80)`              | `deploy: bump secrets to v5 (#80)`                                      |
+| `Mitigate fire-and-forget risks (#87)`  | `worker: make callbacks at-least-once instead of fire-and-forget (#87)` |
+| `UI improvements (#76)`                 | `web: fix empty state on the search page (#76)`                         |
+| `feat: add CSV export (#92)`            | `api: add CSV export for reports (#92)`                                 |
+| `scheduling fix for worker api (#84)`   | `worker: fix scheduled retry ordering (#84)`                            |
