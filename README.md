@@ -10,6 +10,8 @@ When the turn ends, the final duration stays visible until the next turn starts
 | Working | `omp · 0:07` |
 | Done | `omp · 1:42` |
 
+![Herdr sidebar showing an omp agent with a completed 6:07 turn time](docs/assets/agent-time-sidebar.png)
+
 Published as a community plugin. Herdr discovers community plugins on GitHub
 automatically through the `herdr-plugin` topic.
 

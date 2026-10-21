@@ -73,6 +73,7 @@ The repository has no subpackages; all Go files are `package main` at the root.
 |---|---|
 | `/` | CLI, daemon loop, tracker, client, and their tests |
 | `bin/` | Build output; only `.gitkeep` is committed |
+| `docs/assets/` | README images |
 | `.agents/rules/` | Vendored Go documentation rule |
 | `.agents/skills/` | Scoped-commit and `herdr-plugin-reference` skills |
 | `.github/workflows/` | CI workflow |
