@@ -24,7 +24,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: herdr-agent-time <ensure|daemon|stop|status>")
+		fmt.Fprintln(os.Stderr, "usage: herdr-agent-time <ensure|daemon|stop|status|configure>")
 		os.Exit(2)
 	}
 	var err error
@@ -35,6 +35,8 @@ func main() {
 		err = runDaemon()
 	case "stop":
 		err = stopDaemon()
+	case "configure":
+		err = configureSidebar()
 	case "status":
 		err = printStatus()
 	default:

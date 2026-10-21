@@ -38,8 +38,18 @@ Linking a local checkout does not run build commands; build it yourself first.
 
 ## Sidebar row
 
-Add the plugin token to the expanded agent rows. This keeps the default first
-row and puts the timer next to the harness name on the second row:
+Add the row automatically after installing:
+
+```sh
+herdr plugin action invoke cmalec.agent-time.configure
+```
+
+The action appends the row when `[ui.sidebar.agents]` is absent, backs up the
+config first, and reloads Herdr. If the table already exists with a custom
+layout, it leaves it alone and prints the token to add.
+
+Manual form: keep the default first row and put the timer next to the harness
+name on the second row:
 
 ```toml
 [ui.sidebar.agents]
@@ -58,6 +68,7 @@ The plugin manifest starts a detached timer daemon from Herdr's startup hook.
 Actions are available under the `cmalec.agent-time` plugin id:
 
 ```sh
+herdr plugin action invoke cmalec.agent-time.configure
 herdr plugin action invoke cmalec.agent-time.start
 herdr plugin action invoke cmalec.agent-time.stop
 herdr plugin action invoke cmalec.agent-time.status

@@ -18,6 +18,12 @@ contexts = ["global"]
 command = ["bin/herdr-agent-time", "ensure"]
 
 [[actions]]
+id = "configure"
+title = "Add agent timer to sidebar"
+contexts = ["global"]
+command = ["bin/herdr-agent-time", "configure"]
+
+[[actions]]
 id = "stop"
 title = "Stop agent timer"
 contexts = ["global"]
