@@ -2,9 +2,10 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
 	"net"
 	"time"
 )
@@ -12,22 +13,25 @@ import (
 const (
 	sourceID  = "herdr-agent-time"
 	tokenName = "turn_time"
+	pluginID  = "cmalec.agent-time"
 )
 
 // Client talks to the running Herdr server over its Unix socket. One
 // connection is reused; a failed call closes it so the next call reconnects.
+// A Client is not safe for concurrent use.
 type Client struct {
 	socket string
-	logger *log.Logger
 	conn   net.Conn
 	reader *bufio.Reader
 	nextID uint64
 }
 
-func NewClient(socket string, logger *log.Logger) *Client {
-	return &Client{socket: socket, logger: logger}
+// NewClient returns a client for the Herdr server listening on socket.
+func NewClient(socket string) *Client {
+	return &Client{socket: socket}
 }
 
+// Close closes the cached connection. It is safe to call more than once.
 func (c *Client) Close() error {
 	if c.conn == nil {
 		return nil
@@ -38,8 +42,9 @@ func (c *Client) Close() error {
 	return err
 }
 
-func (c *Client) dial() error {
-	conn, err := net.DialTimeout("unix", c.socket, 2*time.Second)
+func (c *Client) dial(ctx context.Context) error {
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := dialer.DialContext(ctx, "unix", c.socket)
 	if err != nil {
 		return err
 	}
@@ -59,26 +64,43 @@ type apiError struct {
 	Message string `json:"message"`
 }
 
+// apiCallError is a deterministic error returned by the Herdr server. Retrying
+// the same request with the same params cannot succeed.
+type apiCallError struct {
+	method  string
+	code    string
+	message string
+}
+
+func (e *apiCallError) Error() string {
+	return fmt.Sprintf("%s: %s: %s", e.method, e.code, e.message)
+}
+
 type apiResponse struct {
 	ID     string          `json:"id"`
 	Result json.RawMessage `json:"result"`
 	Error  *apiError       `json:"error"`
 }
 
-func (c *Client) call(method string, params, result any) error {
+func (c *Client) call(ctx context.Context, method string, params, result any) error {
 	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
+	for range 2 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if c.conn == nil {
-			if err := c.dial(); err != nil {
+			if err := c.dial(ctx); err != nil {
 				lastErr = err
-				time.Sleep(10 * time.Millisecond)
 				continue
 			}
 		}
-		if err := c.doCall(method, params, result); err != nil {
+		if err := c.doCall(ctx, method, params, result); err != nil {
 			lastErr = err
+			var apiErr *apiCallError
+			if errors.As(err, &apiErr) {
+				return err
+			}
 			_ = c.Close()
-			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 		return nil
@@ -86,17 +108,32 @@ func (c *Client) call(method string, params, result any) error {
 	return lastErr
 }
 
-func (c *Client) doCall(method string, params, result any) error {
+func (c *Client) doCall(ctx context.Context, method string, params, result any) error {
 	c.nextID++
 	id := fmt.Sprintf("agent-time-%d", c.nextID)
 	payload, err := json.Marshal(apiRequest{ID: id, Method: method, Params: params})
 	if err != nil {
 		return err
 	}
-	if err := c.conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+	deadline := time.Now().Add(3 * time.Second)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	conn := c.conn
+	if err := conn.SetDeadline(deadline); err != nil {
 		return err
 	}
-	if _, err := c.conn.Write(append(payload, '\n')); err != nil {
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = conn.SetDeadline(time.Now())
+		close(interrupted)
+	})
+	defer func() {
+		if !stop() {
+			<-interrupted
+		}
+	}()
+	if _, err := conn.Write(append(payload, '\n')); err != nil {
 		return err
 	}
 	line, err := c.reader.ReadBytes('\n')
@@ -108,7 +145,11 @@ func (c *Client) doCall(method string, params, result any) error {
 		return fmt.Errorf("decode %s response: %w", method, err)
 	}
 	if response.Error != nil {
-		return fmt.Errorf("%s: %s: %s", method, response.Error.Code, response.Error.Message)
+		return &apiCallError{
+			method:  method,
+			code:    response.Error.Code,
+			message: response.Error.Message,
+		}
 	}
 	if result != nil {
 		if err := json.Unmarshal(response.Result, result); err != nil {
@@ -122,15 +163,41 @@ type agentListResult struct {
 	Agents []AgentInfo `json:"agents"`
 }
 
-func (c *Client) ListAgents() ([]AgentInfo, error) {
+type pluginListResult struct {
+	Plugins []pluginInfo `json:"plugins"`
+}
+
+// pluginInfo is the subset of herdr's installed plugin record the daemon uses
+// to detect disable, uninstall, and installation changes.
+type pluginInfo struct {
+	PluginID   string `json:"plugin_id"`
+	Version    string `json:"version"`
+	Enabled    bool   `json:"enabled"`
+	PluginRoot string `json:"plugin_root"`
+}
+
+// ListPlugins returns the installed plugin registry.
+func (c *Client) ListPlugins(ctx context.Context) ([]pluginInfo, error) {
+	var result pluginListResult
+	if err := c.call(ctx, "plugin.list", struct{}{}, &result); err != nil {
+		return nil, err
+	}
+	return result.Plugins, nil
+}
+
+// ListAgents returns the current agent snapshot. The call respects ctx and
+// applies a three-second deadline when ctx has no earlier deadline.
+func (c *Client) ListAgents(ctx context.Context) ([]AgentInfo, error) {
 	var result agentListResult
-	if err := c.call("agent.list", struct{}{}, &result); err != nil {
+	if err := c.call(ctx, "agent.list", struct{}{}, &result); err != nil {
 		return nil, err
 	}
 	return result.Agents, nil
 }
 
-func (c *Client) Report(paneID, value string, ttl time.Duration) error {
+// Report writes the turn_time token for a pane. A positive ttl makes the value
+// expire unless it is refreshed.
+func (c *Client) Report(ctx context.Context, paneID, value string, ttl time.Duration) error {
 	params := map[string]any{
 		"pane_id": paneID,
 		"source":  sourceID,
@@ -139,14 +206,15 @@ func (c *Client) Report(paneID, value string, ttl time.Duration) error {
 	if ttl > 0 {
 		params["ttl_ms"] = uint64(ttl / time.Millisecond)
 	}
-	return c.call("pane.report_metadata", params, nil)
+	return c.call(ctx, "pane.report_metadata", params, nil)
 }
 
-func (c *Client) Clear(paneID string) error {
+// Clear removes the turn_time token for a pane.
+func (c *Client) Clear(ctx context.Context, paneID string) error {
 	params := map[string]any{
 		"pane_id": paneID,
 		"source":  sourceID,
 		"tokens":  map[string]any{tokenName: nil},
 	}
-	return c.call("pane.report_metadata", params, nil)
+	return c.call(ctx, "pane.report_metadata", params, nil)
 }

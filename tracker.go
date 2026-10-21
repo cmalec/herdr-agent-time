@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"time"
 )
@@ -11,7 +13,8 @@ const (
 	statusWorking = "working"
 	statusBlocked = "blocked"
 
-	liveTTL = 3 * time.Second
+	liveTTL      = 3 * time.Second
+	stateVersion = 1
 )
 
 // AgentInfo is the subset of herdr's agent record the timer needs.
@@ -35,7 +38,6 @@ type PaneState struct {
 	LastSeenMS    int64  `json:"last_seen_ms"`
 	HadToken      bool   `json:"had_token"`
 	ReportPending bool   `json:"report_pending"`
-	Shown         string `json:"shown,omitempty"`
 	Missing       int    `json:"missing,omitempty"`
 
 	// Initialized is runtime-only. A state loaded from disk starts false so the
@@ -48,10 +50,12 @@ type stateFile struct {
 	Panes   map[string]*PaneState `json:"panes"`
 }
 
+// Tracker holds timer state for all panes observed in one Herdr session.
 type Tracker struct {
 	Panes map[string]*PaneState
 }
 
+// NewTracker returns an empty tracker.
 func NewTracker() *Tracker {
 	return &Tracker{Panes: make(map[string]*PaneState)}
 }
@@ -61,7 +65,7 @@ func NewTracker() *Tracker {
 func (t *Tracker) Load(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return err
@@ -69,6 +73,9 @@ func (t *Tracker) Load(path string) error {
 	var file stateFile
 	if err := json.Unmarshal(data, &file); err != nil {
 		return err
+	}
+	if file.Version != stateVersion {
+		return fmt.Errorf("state version %d is not supported", file.Version)
 	}
 	if file.Panes == nil {
 		return nil
@@ -81,7 +88,7 @@ func (t *Tracker) Load(path string) error {
 		// A token may still exist on a live server even though the daemon
 		// restarted. Keep the marker so a changed or vanished agent clears it.
 		st.HadToken = st.HadToken || st.Completed || st.Running
-		st.Shown = ""
+		st.Missing = 0
 		if st.Running && st.TurnStartMS <= 0 {
 			st.Running = false
 			st.Completed = false
@@ -95,17 +102,35 @@ func (t *Tracker) Load(path string) error {
 	return nil
 }
 
+// Save writes the current pane state as JSON. The write is atomic: data goes
+// to a temporary file that is renamed over path.
 func (t *Tracker) Save(path string) error {
-	file := stateFile{Version: 1, Panes: t.Panes}
-	data, err := json.MarshalIndent(file, "", "  ")
+	file := stateFile{Version: stateVersion, Panes: t.Panes}
+	data, err := json.Marshal(file)
 	if err != nil {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	_, writeErr := out.Write(data)
+	if writeErr == nil {
+		writeErr = out.Sync()
+	}
+	if closeErr := out.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		_ = os.Remove(tmp)
+		return writeErr
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // Reinitialize makes the next observation reconcile every pane with the live
@@ -116,6 +141,9 @@ func (t *Tracker) Reinitialize() {
 	}
 }
 
+// Decision describes one metadata write for the daemon to perform. A Clear
+// decision removes the token; otherwise Value is written with the decision's
+// TTL. A zero TTL means the value does not expire.
 type Decision struct {
 	PaneID string
 	Value  string
@@ -185,7 +213,6 @@ func (t *Tracker) observe(agent AgentInfo, nowMS int64) (*Decision, bool) {
 		st.DurationMS = 0
 		st.ReportPending = false
 		st.HadToken = hadToken
-		st.Shown = ""
 		st.Initialized = false
 		changed = true
 		if hadToken {
@@ -285,6 +312,17 @@ func (t *Tracker) observe(agent AgentInfo, nowMS int64) (*Decision, bool) {
 	return nil, changed
 }
 
+// hasRunning reports whether any pane has a live turn. Only live turns need
+// periodic state saves to preserve LastSeenMS.
+func (t *Tracker) hasRunning() bool {
+	for _, st := range t.Panes {
+		if st.Running {
+			return true
+		}
+	}
+	return false
+}
+
 // MarkReported records a successful metadata write. It returns true when the
 // change needs to be persisted.
 func (t *Tracker) MarkReported(paneID, value string) bool {
@@ -293,7 +331,6 @@ func (t *Tracker) MarkReported(paneID, value string) bool {
 		return false
 	}
 	st.HadToken = true
-	st.Shown = value
 	if st.Running {
 		return false
 	}
@@ -314,7 +351,6 @@ func (t *Tracker) MarkCleared(paneID string) bool {
 		return false
 	}
 	st.HadToken = false
-	st.Shown = ""
 	return true
 }
 

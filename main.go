@@ -4,13 +4,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,12 +22,13 @@ import (
 
 const (
 	tickInterval = time.Second
-	saveInterval = 10 * time.Second
+	stopTimeout  = 10 * time.Second
+	startTimeout = 3 * time.Second
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: herdr-agent-time <ensure|daemon|stop|status|configure>")
+		fmt.Fprintln(os.Stderr, "usage: herdr-agent-time <ensure|daemon|stop|status>")
 		os.Exit(2)
 	}
 	var err error
@@ -35,8 +39,6 @@ func main() {
 		err = runDaemon()
 	case "stop":
 		err = stopDaemon()
-	case "configure":
-		err = configureSidebar()
 	case "status":
 		err = printStatus()
 	default:
@@ -50,12 +52,13 @@ func main() {
 }
 
 type paths struct {
-	dir    string
-	socket string
-	lock   string
-	pid    string
-	state  string
-	log    string
+	dir      string
+	socket   string
+	lock     string
+	pid      string
+	identity string
+	state    string
+	log      string
 }
 
 func resolvePaths() (paths, error) {
@@ -81,12 +84,13 @@ func resolvePaths() (paths, error) {
 	sum := sha256.Sum256([]byte(socket))
 	id := hex.EncodeToString(sum[:8])
 	return paths{
-		dir:    dir,
-		socket: socket,
-		lock:   filepath.Join(dir, "daemon-"+id+".lock"),
-		pid:    filepath.Join(dir, "daemon-"+id+".pid"),
-		state:  filepath.Join(dir, "state-"+id+".json"),
-		log:    filepath.Join(dir, "daemon-"+id+".log"),
+		dir:      dir,
+		socket:   socket,
+		lock:     filepath.Join(dir, "daemon-"+id+".lock"),
+		pid:      filepath.Join(dir, "daemon-"+id+".pid"),
+		identity: filepath.Join(dir, "daemon-"+id+".json"),
+		state:    filepath.Join(dir, "state-"+id+".json"),
+		log:      filepath.Join(dir, "daemon-"+id+".log"),
 	}, nil
 }
 
@@ -96,7 +100,7 @@ func acquireLock(path string) (*os.File, error) {
 		return nil, err
 	}
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		file.Close()
+		_ = file.Close()
 		return nil, err
 	}
 	return file, nil
@@ -107,7 +111,7 @@ func lockHeld(path string) bool {
 	if err != nil {
 		return false
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN)
 	}
@@ -115,26 +119,224 @@ func lockHeld(path string) bool {
 	return false
 }
 
+// daemonIdentity records which binary owns the running daemon. ensure uses it
+// to replace a daemon after a plugin update, relink, or local rebuild.
+type daemonIdentity struct {
+	PID           int    `json:"pid"`
+	Executable    string `json:"executable"`
+	SHA256        string `json:"sha256"`
+	PluginRoot    string `json:"plugin_root,omitempty"`
+	StartedUnixMS int64  `json:"started_unix_ms"`
+}
+
+func currentIdentity() (daemonIdentity, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return daemonIdentity{}, err
+	}
+	executable = filepath.Clean(executable)
+	hash, err := fileSHA256(executable)
+	if err != nil {
+		return daemonIdentity{}, err
+	}
+	root := ""
+	if value := os.Getenv("HERDR_PLUGIN_ROOT"); value != "" {
+		root = filepath.Clean(value)
+	}
+	return daemonIdentity{
+		PID:           os.Getpid(),
+		Executable:    executable,
+		SHA256:        hash,
+		PluginRoot:    root,
+		StartedUnixMS: time.Now().UnixMilli(),
+	}, nil
+}
+
+func fileSHA256(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = file.Close() }()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func (id daemonIdentity) matches(other daemonIdentity) bool {
+	if id.SHA256 == "" || id.SHA256 != other.SHA256 || !samePath(id.Executable, other.Executable) {
+		return false
+	}
+	if id.PluginRoot != "" && other.PluginRoot != "" && !samePath(id.PluginRoot, other.PluginRoot) {
+		return false
+	}
+	return true
+}
+
+func samePath(left, right string) bool {
+	if left == "" || right == "" {
+		return false
+	}
+	resolve := func(path string) string {
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			path = resolved
+		}
+		if absolute, err := filepath.Abs(path); err == nil {
+			path = absolute
+		}
+		return filepath.Clean(path)
+	}
+	return resolve(left) == resolve(right)
+}
+
+func readIdentity(path string) (daemonIdentity, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return daemonIdentity{}, err
+	}
+	var identity daemonIdentity
+	if err := json.Unmarshal(data, &identity); err != nil {
+		return daemonIdentity{}, err
+	}
+	if identity.PID <= 0 || identity.Executable == "" || identity.SHA256 == "" {
+		return daemonIdentity{}, errors.New("incomplete daemon identity")
+	}
+	return identity, nil
+}
+
+func writeIdentity(path string, identity daemonIdentity) error {
+	data, err := json.Marshal(identity)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(path, data, 0o600)
+}
+
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	tmp := path + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	_, writeErr := out.Write(data)
+	if writeErr == nil {
+		writeErr = out.Sync()
+	}
+	if closeErr := out.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		_ = os.Remove(tmp)
+		return writeErr
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func removeFile(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func terminatePID(pid int) error {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func processAlive(pid int) bool {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = process.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+func waitLockFree(path string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !lockHeld(path) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func waitLockHeld(path string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if lockHeld(path) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func ensureDaemon() error {
 	p, err := resolvePaths()
 	if err != nil {
 		return err
 	}
-	if lockHeld(p.lock) {
-		fmt.Println("agent-time daemon already running")
-		return nil
-	}
-	executable, err := os.Executable()
+	current, err := currentIdentity()
 	if err != nil {
-		return err
+		return fmt.Errorf("identify executable: %w", err)
 	}
+
+	replaced := false
+	if lockHeld(p.lock) {
+		existing, identityErr := readIdentity(p.identity)
+		if identityErr == nil && existing.matches(current) {
+			fmt.Println("agent-time daemon already running")
+			return nil
+		}
+		pid := 0
+		if identityErr == nil {
+			pid = existing.PID
+		}
+		if pid <= 0 {
+			pid, _ = readPID(p.pid)
+		}
+		if pid <= 0 {
+			return fmt.Errorf("agent-time daemon is running but its pid is unknown; run %q to stop it", "herdr-agent-time stop")
+		}
+		if err := terminatePID(pid); err != nil {
+			return fmt.Errorf("stop old daemon pid %d: %w", pid, err)
+		}
+		if !waitLockFree(p.lock, stopTimeout) {
+			return fmt.Errorf("old daemon pid %d did not stop", pid)
+		}
+		replaced = true
+	}
+
 	logFile, err := os.OpenFile(p.log, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
-	defer logFile.Close()
+	defer func() { _ = logFile.Close() }()
 
-	cmd := exec.Command(executable, "daemon")
+	cmd := exec.Command(current.Executable, "daemon")
 	cmd.Env = os.Environ()
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
@@ -145,8 +347,44 @@ func ensureDaemon() error {
 	}
 	pid := cmd.Process.Pid
 	_ = cmd.Process.Release()
-	fmt.Printf("agent-time daemon started (pid %d)\n", pid)
+
+	if !waitLockHeld(p.lock, startTimeout) {
+		if !processAlive(pid) {
+			return fmt.Errorf("daemon pid %d exited during startup; see %s", pid, p.log)
+		}
+		return fmt.Errorf("daemon pid %d did not acquire the lock; see %s", pid, p.log)
+	}
+	if identity, err := readIdentity(p.identity); err == nil && identity.PID != pid {
+		fmt.Printf("agent-time daemon already running (pid %d)\n", identity.PID)
+		return nil
+	}
+	if replaced {
+		fmt.Printf("agent-time daemon restarted (pid %d)\n", pid)
+	} else {
+		fmt.Printf("agent-time daemon started (pid %d)\n", pid)
+	}
 	return nil
+}
+
+// clearOrphanedTokens removes tokens that a crashed daemon left behind. It is
+// best effort: the server may be gone, and the state file is still removed.
+func clearOrphanedTokens(p paths) {
+	tracker := NewTracker()
+	if err := tracker.Load(p.state); err != nil || len(tracker.Panes) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownClearLimit)
+	defer cancel()
+	client := NewClient(p.socket)
+	defer func() { _ = client.Close() }()
+	for paneID, state := range tracker.Panes {
+		if !state.HadToken {
+			continue
+		}
+		if err := client.Clear(ctx, paneID); err != nil {
+			fmt.Fprintf(os.Stderr, "herdr-agent-time: clear orphaned token %s: %v\n", paneID, err)
+		}
+	}
 }
 
 func stopDaemon() error {
@@ -154,31 +392,41 @@ func stopDaemon() error {
 	if err != nil {
 		return err
 	}
-	if !lockHeld(p.lock) {
-		_ = os.Remove(p.pid)
-		fmt.Println("agent-time daemon is not running")
-		return nil
-	}
-	pid, err := readPID(p.pid)
-	if err != nil {
-		return fmt.Errorf("read pid: %w", err)
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	if err := process.Signal(syscall.SIGTERM); err != nil {
-		return fmt.Errorf("signal pid %d: %w", pid, err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if !lockHeld(p.lock) {
-			fmt.Printf("agent-time daemon stopped (pid %d)\n", pid)
-			return nil
+	running := lockHeld(p.lock)
+	if running {
+		pid := 0
+		if identity, err := readIdentity(p.identity); err == nil {
+			pid = identity.PID
 		}
-		time.Sleep(100 * time.Millisecond)
+		if pid <= 0 {
+			pid, err = readPID(p.pid)
+			if err != nil {
+				return fmt.Errorf("read pid: %w", err)
+			}
+		}
+		if err := terminatePID(pid); err != nil {
+			return fmt.Errorf("signal pid %d: %w", pid, err)
+		}
+		if !waitLockFree(p.lock, stopTimeout) {
+			return fmt.Errorf("daemon pid %d did not stop", pid)
+		}
+		fmt.Printf("agent-time daemon stopped (pid %d)\n", pid)
+	} else {
+		fmt.Println("agent-time daemon is not running")
 	}
-	return fmt.Errorf("daemon pid %d did not stop", pid)
+
+	clearOrphanedTokens(p)
+	if err := removeFile(p.state); err != nil {
+		return fmt.Errorf("clear timer state: %w", err)
+	}
+	if !running {
+		_ = removeFile(p.identity)
+		_ = removeFile(p.pid)
+	}
+	if running {
+		fmt.Println("agent-time timer state cleared")
+	}
+	return nil
 }
 
 func socketInode(path string) (uint64, error) {
@@ -198,7 +446,37 @@ func readPID(path string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return strconv.Atoi(strings.TrimSpace(string(data)))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, err
+	}
+	if pid <= 0 {
+		return 0, fmt.Errorf("invalid pid %d", pid)
+	}
+	return pid, nil
+}
+
+// statusDuration returns the value to display and whether a running value is
+// stale because no daemon is updating it.
+func statusDuration(state *PaneState, daemonRunning bool, now time.Time) (time.Duration, bool) {
+	if !state.Running {
+		return time.Duration(state.DurationMS) * time.Millisecond, false
+	}
+	start := time.UnixMilli(state.TurnStartMS)
+	end := now
+	stale := false
+	if !daemonRunning {
+		end = time.UnixMilli(state.LastSeenMS)
+		if end.Before(start) {
+			end = start
+		}
+		stale = true
+	}
+	duration := end.Sub(start)
+	if duration < 0 {
+		duration = 0
+	}
+	return duration, stale
 }
 
 func printStatus() error {
@@ -206,9 +484,22 @@ func printStatus() error {
 	if err != nil {
 		return err
 	}
-	if lockHeld(p.lock) {
-		pid, _ := readPID(p.pid)
-		fmt.Printf("daemon: running (pid %d)\n", pid)
+	running := lockHeld(p.lock)
+	if running {
+		pid := 0
+		if identity, err := readIdentity(p.identity); err == nil {
+			pid = identity.PID
+		}
+		if pid <= 0 {
+			if value, err := readPID(p.pid); err == nil {
+				pid = value
+			}
+		}
+		if pid > 0 {
+			fmt.Printf("daemon: running (pid %d)\n", pid)
+		} else {
+			fmt.Println("daemon: running (pid unknown)")
+		}
 	} else {
 		fmt.Println("daemon: not running")
 	}
@@ -222,13 +513,17 @@ func printStatus() error {
 		fmt.Println("panes: none")
 		return nil
 	}
-	for paneID, st := range tracker.Panes {
-		duration := st.DurationMS
-		if st.Running && st.TurnStartMS > 0 {
-			duration = time.Now().UnixMilli() - st.TurnStartMS
-		}
-		fmt.Printf("%s agent=%s status=%s running=%t completed=%t duration=%s\n",
-			paneID, st.Agent, st.Status, st.Running, st.Completed, formatDuration(duration))
+	paneIDs := make([]string, 0, len(tracker.Panes))
+	for paneID := range tracker.Panes {
+		paneIDs = append(paneIDs, paneID)
+	}
+	slices.Sort(paneIDs)
+	now := time.Now()
+	for _, paneID := range paneIDs {
+		state := tracker.Panes[paneID]
+		duration, stale := statusDuration(state, running, now)
+		fmt.Printf("%s agent=%s status=%s running=%t completed=%t stale=%t duration=%s\n",
+			paneID, state.Agent, state.Status, state.Running, state.Completed, stale, formatDuration(duration.Milliseconds()))
 	}
 	return nil
 }
@@ -253,26 +548,41 @@ func runDaemon() error {
 		}
 		return err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 
-	if err := os.WriteFile(p.pid, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+	// A previous daemon may have crashed before removing these files. Clear
+	// them before writing this daemon's identity so stop and ensure cannot
+	// signal a stale PID.
+	_ = removeFile(p.identity)
+	_ = removeFile(p.pid)
+
+	pid := os.Getpid()
+	if err := writeFileAtomic(p.pid, []byte(strconv.Itoa(pid)), 0o600); err != nil {
 		return err
 	}
-	defer os.Remove(p.pid)
+	defer func() { _ = removeFile(p.pid) }()
 
 	logger, logFile, err := openLog(p)
 	if err != nil {
 		return err
 	}
-	defer logFile.Close()
-	logger.Printf("daemon start pid=%d socket=%s", os.Getpid(), p.socket)
+	defer func() { _ = logFile.Close() }()
+	logger.Printf("daemon start pid=%d socket=%s", pid, p.socket)
+
+	identity, identityErr := currentIdentity()
+	if identityErr != nil {
+		logger.Printf("identity: %v", identityErr)
+	} else if err := writeIdentity(p.identity, identity); err != nil {
+		logger.Printf("write identity: %v", err)
+	}
+	defer func() { _ = removeFile(p.identity) }()
 
 	tracker := NewTracker()
 	if err := tracker.Load(p.state); err != nil {
 		logger.Printf("load state: %v", err)
 	}
-	client := NewClient(p.socket, logger)
-	defer client.Close()
+	client := NewClient(p.socket)
+	defer func() { _ = client.Close() }()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -280,88 +590,6 @@ func runDaemon() error {
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 
-	lastSave := time.Now()
-	dirty := false
-	lastInode, _ := socketInode(p.socket)
-	failures := 0
-	var lastListLog time.Time
-	var lastReportLog time.Time
-
-	for {
-		select {
-		case <-ctx.Done():
-			logger.Printf("daemon stopping")
-			for paneID, st := range tracker.Panes {
-				if st.HadToken {
-					if err := client.Clear(paneID); err != nil {
-						logger.Printf("clear %s: %v", paneID, err)
-					}
-				}
-			}
-			if err := tracker.Save(p.state); err != nil {
-				logger.Printf("save state: %v", err)
-			}
-			return nil
-
-		case now := <-ticker.C:
-			if inode, err := socketInode(p.socket); err == nil {
-				if lastInode != 0 && inode != lastInode {
-					logger.Printf("Herdr socket changed; reconciling state")
-					tracker.Reinitialize()
-				}
-				lastInode = inode
-			}
-
-			agents, err := client.ListAgents()
-			if err != nil {
-				failures++
-				if failures == 1 || now.Sub(lastListLog) >= 30*time.Second {
-					logger.Printf("agent.list: %v", err)
-					lastListLog = now
-				}
-				if failures >= 300 {
-					logger.Printf("agent.list failed %d times; exiting", failures)
-					return nil
-				}
-				continue
-			}
-			failures = 0
-
-			decisions, stateChanged := tracker.ObserveAll(agents, now)
-			if stateChanged {
-				dirty = true
-			}
-			for _, decision := range decisions {
-				var reportErr error
-				if decision.Clear {
-					reportErr = client.Clear(decision.PaneID)
-				} else {
-					reportErr = client.Report(decision.PaneID, decision.Value, decision.TTL)
-				}
-				if reportErr != nil {
-					if now.Sub(lastReportLog) >= 5*time.Second {
-						logger.Printf("report %s: %v", decision.PaneID, reportErr)
-						lastReportLog = now
-					}
-					continue
-				}
-				if decision.Clear {
-					if tracker.MarkCleared(decision.PaneID) {
-						dirty = true
-					}
-				} else if tracker.MarkReported(decision.PaneID, decision.Value) {
-					dirty = true
-				}
-			}
-
-			if dirty || now.Sub(lastSave) >= saveInterval {
-				if err := tracker.Save(p.state); err != nil {
-					logger.Printf("save state: %v", err)
-				} else {
-					dirty = false
-					lastSave = now
-				}
-			}
-		}
-	}
+	daemon := newDaemon(p, tracker, client, logger)
+	return daemon.run(ctx, ticker.C)
 }

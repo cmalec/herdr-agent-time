@@ -1,10 +1,16 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+var testStart = time.Unix(1_700_000_000, 0)
 
 func observation(pane, agent, status string, seq uint64) AgentInfo {
 	return AgentInfo{PaneID: pane, Agent: agent, AgentStatus: status, StateChangeSeq: seq}
@@ -16,261 +22,403 @@ func observeOne(t *testing.T, tracker *Tracker, agent AgentInfo, now time.Time) 
 	return decisions
 }
 
-func TestWorkingTimerAndFormatting(t *testing.T) {
-	tracker := NewTracker()
-	start := time.Unix(1_700_000_000, 0)
+func report(t *testing.T, tracker *Tracker, decisions []Decision) {
+	t.Helper()
+	require.Len(t, decisions, 1)
+	require.False(t, decisions[0].Clear)
+	_ = tracker.MarkReported(decisions[0].PaneID, decisions[0].Value)
+}
 
-	decisions := observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), start)
-	if len(decisions) != 1 {
-		t.Fatalf("got %d decisions, want 1", len(decisions))
-	}
-	if decisions[0].Value != "0:00" || decisions[0].TTL != liveTTL {
-		t.Fatalf("first decision = %+v, want value 0:00 and live TTL", decisions[0])
-	}
-	tracker.MarkReported("w1:p1", decisions[0].Value)
-
-	decisions = observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), start.Add(65*time.Second))
-	if len(decisions) != 1 || decisions[0].Value != "1:05" {
-		t.Fatalf("after 65s decisions = %+v, want 1:05", decisions)
+func TestObserveAllWorkingTurn(t *testing.T) {
+	tests := []struct {
+		name   string
+		offset time.Duration
+		want   string
+	}{
+		{name: "starts at zero", offset: 0, want: "0:00"},
+		{name: "formats minutes", offset: 65 * time.Second, want: "1:05"},
+		{name: "formats hours", offset: time.Hour + time.Minute + time.Second, want: "1:01:01"},
 	}
 
-	decisions = observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), start.Add(3661*time.Second))
-	if len(decisions) != 1 || decisions[0].Value != "1:01:01" {
-		t.Fatalf("after 1h1m1s decisions = %+v, want 1:01:01", decisions)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tracker := NewTracker()
+			decisions, changed := tracker.ObserveAll(
+				[]AgentInfo{observation("w1:p1", "omp", statusWorking, 1)},
+				testStart,
+			)
+			require.Len(t, decisions, 1)
+			assert.True(t, changed)
+			assert.Equal(t, Decision{PaneID: "w1:p1", Value: "0:00", TTL: liveTTL}, decisions[0])
+			assert.False(t, tracker.MarkReported("w1:p1", decisions[0].Value))
+
+			decisions, changed = tracker.ObserveAll(
+				[]AgentInfo{observation("w1:p1", "omp", statusWorking, 1)},
+				testStart.Add(tt.offset),
+			)
+			require.Len(t, decisions, 1)
+			assert.False(t, changed)
+			assert.Equal(t, Decision{PaneID: "w1:p1", Value: tt.want, TTL: liveTTL}, decisions[0])
+		})
 	}
 }
 
-func TestCompletionFreezesAndNewTurnResets(t *testing.T) {
-	tracker := NewTracker()
-	start := time.Unix(1_700_000_000, 0)
-
-	decisions := observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), start)
-	tracker.MarkReported("w1:p1", decisions[0].Value)
-
-	decisions = observeOne(t, tracker, observation("w1:p1", "omp", statusBlocked, 2), start.Add(10*time.Second))
-	if len(decisions) != 1 || decisions[0].Value != "0:10" {
-		t.Fatalf("blocked decisions = %+v, want 0:10", decisions)
-	}
-	tracker.MarkReported("w1:p1", decisions[0].Value)
-
-	decisions = observeOne(t, tracker, observation("w1:p1", "omp", "done", 3), start.Add(20*time.Second))
-	if len(decisions) != 1 || decisions[0].Value != "0:20" || decisions[0].TTL != 0 {
-		t.Fatalf("done decisions = %+v, want frozen 0:20", decisions)
-	}
-	if !tracker.MarkReported("w1:p1", decisions[0].Value) {
-		t.Fatal("MarkReported should persist the pending completion")
+func TestObserveAllBlockedKeepsTurnRunning(t *testing.T) {
+	tests := []struct {
+		name   string
+		offset time.Duration
+		want   string
+	}{
+		{name: "counts ten seconds", offset: 10 * time.Second, want: "0:10"},
+		{name: "counts through a wait", offset: 90 * time.Second, want: "1:30"},
 	}
 
-	if decisions = observeOne(t, tracker, observation("w1:p1", "omp", "done", 3), start.Add(21*time.Second)); len(decisions) != 0 {
-		t.Fatalf("done tick repeated decision: %+v", decisions)
-	}
-	if decisions = observeOne(t, tracker, observation("w1:p1", "omp", "idle", 4), start.Add(22*time.Second)); len(decisions) != 0 {
-		t.Fatalf("idle after done repeated decision: %+v", decisions)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tracker := NewTracker()
+			report(t, tracker, observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), testStart))
 
-	decisions = observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 5), start.Add(30*time.Second))
-	if len(decisions) != 1 || decisions[0].Value != "0:00" || decisions[0].TTL != liveTTL {
-		t.Fatalf("new turn decisions = %+v, want fresh 0:00", decisions)
-	}
-	tracker.MarkReported("w1:p1", decisions[0].Value)
-	decisions = observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 5), start.Add(35*time.Second))
-	if len(decisions) != 1 || decisions[0].Value != "0:05" {
-		t.Fatalf("new turn after 5s decisions = %+v, want 0:05", decisions)
+			decisions := observeOne(t, tracker, observation("w1:p1", "omp", statusBlocked, 2), testStart.Add(tt.offset))
+			require.Len(t, decisions, 1)
+			assert.Equal(t, Decision{PaneID: "w1:p1", Value: tt.want, TTL: liveTTL}, decisions[0])
+		})
 	}
 }
 
-func TestIdleWithoutWorkingShowsNothing(t *testing.T) {
-	tracker := NewTracker()
-	if decisions := observeOne(t, tracker, observation("w1:p1", "omp", "idle", 1), time.Unix(1_700_000_000, 0)); len(decisions) != 0 {
-		t.Fatalf("got decisions for idle agent: %+v", decisions)
+func TestObserveAllCompletionFreezesTurn(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+	}{
+		{name: "done", status: "done"},
+		{name: "idle", status: "idle"},
+		{name: "unknown", status: "unknown"},
 	}
-	if decisions := observeOne(t, tracker, observation("w1:p1", "omp", statusBlocked, 2), time.Unix(1_700_000_001, 0)); len(decisions) != 0 {
-		t.Fatalf("got decisions for blocked agent with no turn: %+v", decisions)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tracker := NewTracker()
+			report(t, tracker, observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), testStart))
+
+			decisions := observeOne(t, tracker, observation("w1:p1", "omp", tt.status, 2), testStart.Add(20*time.Second))
+			require.Len(t, decisions, 1)
+			assert.Equal(t, Decision{PaneID: "w1:p1", Value: "0:20"}, decisions[0])
+			assert.True(t, tracker.MarkReported("w1:p1", decisions[0].Value))
+
+			assert.Empty(t, observeOne(t, tracker, observation("w1:p1", "omp", tt.status, 2), testStart.Add(21*time.Second)))
+
+			decisions = observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 3), testStart.Add(30*time.Second))
+			require.Len(t, decisions, 1)
+			assert.Equal(t, Decision{PaneID: "w1:p1", Value: "0:00", TTL: liveTTL}, decisions[0])
+		})
 	}
 }
 
-func TestAgentReplacementClearsOldToken(t *testing.T) {
-	tracker := NewTracker()
-	start := time.Unix(1_700_000_000, 0)
-	decisions := observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), start)
-	tracker.MarkReported("w1:p1", decisions[0].Value)
+func TestObserveAllWithoutTurnShowsNothing(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+	}{
+		{name: "idle", status: "idle"},
+		{name: "blocked", status: statusBlocked},
+		{name: "done", status: "done"},
+		{name: "unknown", status: "unknown"},
+	}
 
-	decisions = observeOne(t, tracker, observation("w1:p1", "claude", "idle", 1), start.Add(time.Second))
-	if len(decisions) != 1 || !decisions[0].Clear {
-		t.Fatalf("agent replacement decisions = %+v, want clear", decisions)
-	}
-	if !tracker.MarkCleared("w1:p1") {
-		t.Fatal("MarkCleared should report a change")
-	}
-	if decisions = observeOne(t, tracker, observation("w1:p1", "claude", "idle", 1), start.Add(2*time.Second)); len(decisions) != 0 {
-		t.Fatalf("replacement idle repeated decision: %+v", decisions)
-	}
-	decisions = observeOne(t, tracker, observation("w1:p1", "claude", statusWorking, 2), start.Add(3*time.Second))
-	if len(decisions) != 1 || decisions[0].Value != "0:00" {
-		t.Fatalf("replacement working decisions = %+v, want fresh timer", decisions)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tracker := NewTracker()
+			assert.Empty(t, observeOne(t, tracker, observation("w1:p1", "omp", tt.status, 1), testStart))
+		})
 	}
 }
 
-func TestMissingPaneClearsAfterGrace(t *testing.T) {
-	tracker := NewTracker()
-	start := time.Unix(1_700_000_000, 0)
-	decisions := observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), start)
-	tracker.MarkReported("w1:p1", decisions[0].Value)
+func TestObserveAllAgentReplacementClearsToken(t *testing.T) {
+	tests := []struct {
+		name              string
+		replacementStatus string
+		wantNext          []Decision
+	}{
+		{
+			name:              "idle replacement",
+			replacementStatus: "idle",
+		},
+		{
+			name:              "working replacement starts fresh",
+			replacementStatus: statusWorking,
+			wantNext:          []Decision{{PaneID: "w1:p1", Value: "0:00", TTL: liveTTL}},
+		},
+		{
+			name:              "done replacement stays quiet",
+			replacementStatus: "done",
+		},
+	}
 
-	for i := 1; i <= 2; i++ {
-		decisions, _ = tracker.ObserveAll(nil, start.Add(time.Duration(i)*time.Second))
-		if len(decisions) != 0 {
-			t.Fatalf("missing tick %d produced decision: %+v", i, decisions)
-		}
-	}
-	decisions, changed := tracker.ObserveAll(nil, start.Add(3*time.Second))
-	if len(decisions) != 1 || !decisions[0].Clear || !changed {
-		t.Fatalf("third missing tick = %+v changed=%t, want clear", decisions, changed)
-	}
-	if _, ok := tracker.Panes["w1:p1"]; ok {
-		t.Fatal("missing pane was not removed")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tracker := NewTracker()
+			report(t, tracker, observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), testStart))
+
+			decisions := observeOne(t, tracker, observation("w1:p1", "claude", tt.replacementStatus, 1), testStart.Add(time.Second))
+			require.Len(t, decisions, 1)
+			assert.True(t, decisions[0].Clear)
+			assert.True(t, tracker.MarkCleared("w1:p1"))
+
+			decisions = observeOne(t, tracker, observation("w1:p1", "claude", tt.replacementStatus, 1), testStart.Add(2*time.Second))
+			assert.Equal(t, tt.wantNext, decisions)
+		})
 	}
 }
 
-func TestLoadCompletedReplaysToken(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	start := time.Unix(1_700_000_000, 0)
-	tracker := NewTracker()
-	decisions := observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), start)
-	tracker.MarkReported("w1:p1", decisions[0].Value)
-	decisions = observeOne(t, tracker, observation("w1:p1", "omp", "done", 2), start.Add(42*time.Second))
-	tracker.MarkReported("w1:p1", decisions[0].Value)
-	if err := tracker.Save(path); err != nil {
-		t.Fatal(err)
+func TestObserveAllMissingPaneGrace(t *testing.T) {
+	tests := []struct {
+		name      string
+		misses    int
+		wantClear bool
+	}{
+		{name: "first miss keeps pane", misses: 1},
+		{name: "second miss keeps pane", misses: 2},
+		{name: "third miss clears pane", misses: 3, wantClear: true},
 	}
 
-	restored := NewTracker()
-	if err := restored.Load(path); err != nil {
-		t.Fatal(err)
-	}
-	decisions = observeOne(t, restored, observation("w1:p1", "omp", "idle", 3), start.Add(60*time.Second))
-	if len(decisions) != 1 || decisions[0].Value != "0:42" {
-		t.Fatalf("restored completed decisions = %+v, want 0:42", decisions)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tracker := NewTracker()
+			report(t, tracker, observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), testStart))
+
+			var decisions []Decision
+			var changed bool
+			for i := range tt.misses {
+				decisions, changed = tracker.ObserveAll(nil, testStart.Add(time.Duration(i+1)*time.Second))
+				if i < tt.misses-1 {
+					assert.Empty(t, decisions)
+					assert.False(t, changed)
+				}
+			}
+
+			if !tt.wantClear {
+				assert.Empty(t, decisions)
+				assert.False(t, changed)
+				assert.Contains(t, tracker.Panes, "w1:p1")
+				return
+			}
+
+			require.Len(t, decisions, 1)
+			assert.True(t, decisions[0].Clear)
+			assert.True(t, changed)
+			assert.NotContains(t, tracker.Panes, "w1:p1")
+		})
 	}
 }
 
-func TestLoadRunningResumesOnlySameTurn(t *testing.T) {
-	start := time.Unix(1_700_000_000, 0)
+func TestObserveAllMultipleAgents(t *testing.T) {
+	tests := []struct {
+		name   string
+		agents []AgentInfo
+		want   map[string]string
+	}{
+		{
+			name: "writes every working pane",
+			agents: []AgentInfo{
+				observation("w1:p1", "omp", statusWorking, 1),
+				observation("w1:p2", "claude", statusWorking, 1),
+			},
+			want: map[string]string{"w1:p1": "0:00", "w1:p2": "0:00"},
+		},
+		{
+			name: "skips panes without a turn and empty ids",
+			agents: []AgentInfo{
+				observation("w1:p1", "omp", statusWorking, 1),
+				observation("w1:p2", "claude", "idle", 1),
+				observation("", "ignored", statusWorking, 1),
+			},
+			want: map[string]string{"w1:p1": "0:00"},
+		},
+	}
 
-	// Same sequence: keep the original start and include the downtime.
-	tracker := NewTracker()
-	decisions := observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 7), start)
-	tracker.MarkReported("w1:p1", decisions[0].Value)
-	path := filepath.Join(t.TempDir(), "state.json")
-	if err := tracker.Save(path); err != nil {
-		t.Fatal(err)
-	}
-	restored := NewTracker()
-	if err := restored.Load(path); err != nil {
-		t.Fatal(err)
-	}
-	decisions = observeOne(t, restored, observation("w1:p1", "omp", statusWorking, 7), start.Add(30*time.Second))
-	if len(decisions) != 1 || decisions[0].Value != "0:30" {
-		t.Fatalf("resumed same turn = %+v, want 0:30", decisions)
-	}
-
-	// Different sequence: the agent changed while the daemon was down, so do
-	// not carry the old start forward.
-	tracker = NewTracker()
-	decisions = observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 7), start)
-	tracker.MarkReported("w1:p1", decisions[0].Value)
-	if err := tracker.Save(path); err != nil {
-		t.Fatal(err)
-	}
-	restored = NewTracker()
-	if err := restored.Load(path); err != nil {
-		t.Fatal(err)
-	}
-	decisions = observeOne(t, restored, observation("w1:p1", "omp", statusWorking, 8), start.Add(30*time.Second))
-	if len(decisions) != 1 || decisions[0].Value != "0:00" {
-		t.Fatalf("resumed changed turn = %+v, want fresh timer", decisions)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tracker := NewTracker()
+			decisions, _ := tracker.ObserveAll(tt.agents, testStart)
+			got := make(map[string]string, len(decisions))
+			for _, decision := range decisions {
+				got[decision.PaneID] = decision.Value
+			}
+			assert.Equal(t, tt.want, got)
+		})
 	}
 }
 
-func TestLoadRunningFrozenAtLastSeen(t *testing.T) {
-	start := time.Unix(1_700_000_000, 0)
-	tracker := NewTracker()
-	decisions := observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 7), start)
-	tracker.MarkReported("w1:p1", decisions[0].Value)
-	tracker.Panes["w1:p1"].LastSeenMS = start.UnixMilli() + 12_000
+func TestTrackerPersistence(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(t *testing.T, tracker *Tracker, start time.Time)
+		action    func(t *testing.T, tracker *Tracker, start time.Time) []Decision
+		want      []Decision
+		wantPanes int
+	}{
+		{
+			name: "replays a completed value",
+			setup: func(t *testing.T, tracker *Tracker, start time.Time) {
+				report(t, tracker, observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), start))
+				report(t, tracker, observeOne(t, tracker, observation("w1:p1", "omp", "done", 2), start.Add(42*time.Second)))
+			},
+			action: func(t *testing.T, tracker *Tracker, start time.Time) []Decision {
+				return observeOne(t, tracker, observation("w1:p1", "omp", "idle", 3), start.Add(60*time.Second))
+			},
+			want:      []Decision{{PaneID: "w1:p1", Value: "0:42"}},
+			wantPanes: 1,
+		},
+		{
+			name: "resumes the same running turn",
+			setup: func(t *testing.T, tracker *Tracker, start time.Time) {
+				report(t, tracker, observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 7), start))
+			},
+			action: func(t *testing.T, tracker *Tracker, start time.Time) []Decision {
+				return observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 7), start.Add(30*time.Second))
+			},
+			want:      []Decision{{PaneID: "w1:p1", Value: "0:30", TTL: liveTTL}},
+			wantPanes: 1,
+		},
+		{
+			name: "starts fresh when the sequence changed",
+			setup: func(t *testing.T, tracker *Tracker, start time.Time) {
+				report(t, tracker, observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 7), start))
+			},
+			action: func(t *testing.T, tracker *Tracker, start time.Time) []Decision {
+				return observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 8), start.Add(30*time.Second))
+			},
+			want:      []Decision{{PaneID: "w1:p1", Value: "0:00", TTL: liveTTL}},
+			wantPanes: 1,
+		},
+		{
+			name: "freezes at the last observed time",
+			setup: func(t *testing.T, tracker *Tracker, start time.Time) {
+				report(t, tracker, observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 7), start))
+				tracker.Panes["w1:p1"].LastSeenMS = start.Add(12 * time.Second).UnixMilli()
+			},
+			action: func(t *testing.T, tracker *Tracker, start time.Time) []Decision {
+				return observeOne(t, tracker, observation("w1:p1", "omp", "done", 8), start.Add(5*time.Minute))
+			},
+			want:      []Decision{{PaneID: "w1:p1", Value: "0:12"}},
+			wantPanes: 1,
+		},
+		{
+			name: "clears a loaded token when the agent changes",
+			setup: func(t *testing.T, tracker *Tracker, start time.Time) {
+				report(t, tracker, observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), start))
+				report(t, tracker, observeOne(t, tracker, observation("w1:p1", "omp", "done", 2), start.Add(8*time.Second)))
+			},
+			action: func(t *testing.T, tracker *Tracker, start time.Time) []Decision {
+				return observeOne(t, tracker, observation("w1:p1", "claude", "idle", 3), start.Add(9*time.Second))
+			},
+			want:      []Decision{{PaneID: "w1:p1", Clear: true}},
+			wantPanes: 1,
+		},
+	}
 
-	path := filepath.Join(t.TempDir(), "state.json")
-	if err := tracker.Save(path); err != nil {
-		t.Fatal(err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			tracker := NewTracker()
+			tt.setup(t, tracker, testStart)
+			require.NoError(t, tracker.Save(path))
+
+			restored := NewTracker()
+			require.NoError(t, restored.Load(path))
+			assert.Equal(t, tt.want, tt.action(t, restored, testStart))
+			assert.Len(t, restored.Panes, tt.wantPanes)
+		})
 	}
-	restored := NewTracker()
-	if err := restored.Load(path); err != nil {
-		t.Fatal(err)
+}
+
+func TestTrackerLoad(t *testing.T) {
+	tests := []struct {
+		name      string
+		content   string
+		write     bool
+		wantErr   bool
+		wantPanes int
+	}{
+		{name: "missing file is empty state"},
+		{name: "invalid JSON fails", content: "{", write: true, wantErr: true},
+		{name: "empty state file is valid", content: `{"version":1}`, write: true},
+		{name: "rejects an unsupported version", content: `{"version":2}`, write: true, wantErr: true},
+		{
+			name:      "restores panes",
+			content:   `{"version":1,"panes":{"w1:p1":{"agent":"omp","completed":true,"duration_ms":42000}}}`,
+			write:     true,
+			wantPanes: 1,
+		},
 	}
-	decisions = observeOne(t, restored, observation("w1:p1", "omp", "done", 8), start.Add(5*time.Minute))
-	if len(decisions) != 1 || decisions[0].Value != "0:12" {
-		t.Fatalf("frozen at last seen = %+v, want 0:12", decisions)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			if tt.write {
+				require.NoError(t, os.WriteFile(path, []byte(tt.content), 0o600))
+			}
+			tracker := NewTracker()
+			err := tracker.Load(path)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Len(t, tracker.Panes, tt.wantPanes)
+		})
+	}
+}
+
+func TestTrackerReinitialize(t *testing.T) {
+	tests := []struct {
+		name         string
+		reinitialize bool
+		want         []Decision
+	}{
+		{name: "settled completion stays quiet"},
+		{
+			name:         "reinitialize replays completion",
+			reinitialize: true,
+			want:         []Decision{{PaneID: "w1:p1", Value: "0:09"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tracker := NewTracker()
+			report(t, tracker, observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), testStart))
+			report(t, tracker, observeOne(t, tracker, observation("w1:p1", "omp", "done", 2), testStart.Add(9*time.Second)))
+			assert.Empty(t, observeOne(t, tracker, observation("w1:p1", "omp", "done", 2), testStart.Add(10*time.Second)))
+
+			if tt.reinitialize {
+				tracker.Reinitialize()
+			}
+			assert.Equal(t, tt.want, observeOne(t, tracker, observation("w1:p1", "omp", "done", 2), testStart.Add(11*time.Second)))
+		})
 	}
 }
 
 func TestFormatDuration(t *testing.T) {
 	tests := []struct {
+		name string
 		ms   int64
 		want string
 	}{
-		{-1, "0:00"},
-		{0, "0:00"},
-		{999, "0:00"},
-		{1000, "0:01"},
-		{59_999, "0:59"},
-		{60_000, "1:00"},
-		{3_599_000, "59:59"},
-		{3_600_000, "1:00:00"},
-		{3_661_000, "1:01:01"},
-	}
-	for _, test := range tests {
-		if got := formatDuration(test.ms); got != test.want {
-			t.Errorf("formatDuration(%d) = %q, want %q", test.ms, got, test.want)
-		}
-	}
-}
-
-func TestReinitializeReplaysCompletedToken(t *testing.T) {
-	tracker := NewTracker()
-	start := time.Unix(1_700_000_000, 0)
-	decisions := observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), start)
-	tracker.MarkReported("w1:p1", decisions[0].Value)
-	decisions = observeOne(t, tracker, observation("w1:p1", "omp", "done", 2), start.Add(9*time.Second))
-	tracker.MarkReported("w1:p1", decisions[0].Value)
-
-	if decisions = observeOne(t, tracker, observation("w1:p1", "omp", "done", 2), start.Add(10*time.Second)); len(decisions) != 0 {
-		t.Fatalf("settled completion repeated: %+v", decisions)
-	}
-	tracker.Reinitialize()
-	decisions = observeOne(t, tracker, observation("w1:p1", "omp", "done", 2), start.Add(11*time.Second))
-	if len(decisions) != 1 || decisions[0].Value != "0:09" {
-		t.Fatalf("reinitialized completion = %+v, want replayed 0:09", decisions)
-	}
-}
-
-func TestLoadedTokenClearsWhenAgentChanges(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	start := time.Unix(1_700_000_000, 0)
-	tracker := NewTracker()
-	decisions := observeOne(t, tracker, observation("w1:p1", "omp", statusWorking, 1), start)
-	tracker.MarkReported("w1:p1", decisions[0].Value)
-	decisions = observeOne(t, tracker, observation("w1:p1", "omp", "done", 2), start.Add(8*time.Second))
-	tracker.MarkReported("w1:p1", decisions[0].Value)
-	if err := tracker.Save(path); err != nil {
-		t.Fatal(err)
+		{name: "negative clamps", ms: -1, want: "0:00"},
+		{name: "zero", ms: 0, want: "0:00"},
+		{name: "sub-second", ms: 999, want: "0:00"},
+		{name: "one second", ms: 1000, want: "0:01"},
+		{name: "fifty nine seconds", ms: 59_999, want: "0:59"},
+		{name: "one minute", ms: 60_000, want: "1:00"},
+		{name: "just under an hour", ms: 3_599_000, want: "59:59"},
+		{name: "one hour", ms: 3_600_000, want: "1:00:00"},
+		{name: "hours minutes seconds", ms: 3_661_000, want: "1:01:01"},
 	}
 
-	restored := NewTracker()
-	if err := restored.Load(path); err != nil {
-		t.Fatal(err)
-	}
-	decisions = observeOne(t, restored, observation("w1:p1", "claude", "idle", 3), start.Add(9*time.Second))
-	if len(decisions) != 1 || !decisions[0].Clear {
-		t.Fatalf("loaded replacement decisions = %+v, want clear", decisions)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, formatDuration(tt.ms))
+		})
 	}
 }

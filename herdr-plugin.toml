@@ -1,6 +1,6 @@
 id = "cmalec.agent-time"
 name = "Agent Time"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.0"
 description = "Show the current turn runtime, then the duration it took, next to each agent in the sidebar"
 platforms = ["macos", "linux"]
@@ -16,12 +16,6 @@ id = "start"
 title = "Start agent timer"
 contexts = ["global"]
 command = ["bin/herdr-agent-time", "ensure"]
-
-[[actions]]
-id = "configure"
-title = "Add agent timer to sidebar"
-contexts = ["global"]
-command = ["bin/herdr-agent-time", "configure"]
 
 [[actions]]
 id = "stop"
