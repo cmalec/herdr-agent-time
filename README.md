@@ -25,7 +25,7 @@ turn that ended while the daemon was away freezes at its last observed time.
 From GitHub:
 
 ```sh
-herdr plugin install cmalec/herdr-agent-time
+herdr plugin install --yes cmalec/herdr-agent-time
 ```
 
 For local development, build the binary first:
@@ -94,7 +94,7 @@ Copy this to a coding agent:
 ```text
 Install and configure the Herdr Agent Time plugin.
 
-1. Run: herdr plugin install cmalec/herdr-agent-time
+1. Run: herdr plugin install --yes cmalec/herdr-agent-time
 2. Open the Herdr config at $HERDR_CONFIG_PATH or ~/.config/herdr/config.toml.
    Add "$turn_time" to the [ui.sidebar.agents] row that contains "agent".
    If the table is absent, add this table:
